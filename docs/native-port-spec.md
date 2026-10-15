@@ -1,4 +1,9 @@
-# Tekken 6 Native Online — Linux Port
+# Tekken 6 Native Online — Linux Port (native rebuild)
+
+> **Abandoned on 2026-10-15.** The goal is to play against Windows players. A native rebuild cannot
+> do that: the lobby pairs players by the SHA-256 of `tekken6.exe`, the netplay code is closed, and
+> `rexruntime.dll` is a private fork of ReXGlue (T6-specific code), not stock v0.10.0. The project now
+> runs the unchanged Windows release under Proton. See the README. This file stays as research.
 
 **Project spec. Status: draft 1. Owner: az.**
 

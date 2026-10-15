@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# t6: run Tekken 6 Native Online (the Windows release) on Linux with Proton.
+# The game and the launcher are the unchanged Windows files, so the exe hash, the lobby and the
+# netcode are the same as on Windows: Linux players can play against Windows players.
+set -euo pipefail
+
+REPO=Ekspym/Tekken6-native-online
+ASSET=tekken6_native_online.zip
+EXE="Tekken6 Native Online.exe"
+DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}
+T6_HOME=${T6_HOME:-$HOME/Games/Tekken6NativeOnline}
+T6_DATA=${T6_DATA:-$DATA_DIR/tekken6-linux}
+T6_GPU=${T6_GPU:-auto}
+COMPAT=$T6_DATA/compat
+PFX=$COMPAT/pfx
+LOG=$T6_DATA/launcher.log
+COLOR_DIR=$PFX/drive_c/windows/system32/spool/drivers/color
+COLOR_ICM="srgb color space profile.icm"
+TOML_FIX="execute_unclipped_draw_vs_on_cpu = true"
+
+say() { printf '%s\n' "$*"; }
+die() { printf 't6: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<EOF
+usage: t6 <command>
+
+  install [zip]   Download the latest release (or use a local zip), verify it, extract it to T6_HOME.
+  run             Apply the fixes and start the launcher (it builds and starts the game).
+  fix             Only apply the fixes.
+  doctor          Show the setup and check it.
+  hash            Print the SHA-256 of the built game (compare it with a Windows player).
+  desktop         Add a menu entry that starts the launcher.
+
+Environment:
+  T6_HOME   game package folder   (now: $T6_HOME)
+  T6_DATA   Proton prefix, logs   (now: $T6_DATA)
+  T6_GPU    auto | nvidia | default   (now: $T6_GPU)
+  PROTON    Proton folder (holds the 'proton' script); default: newest GE-Proton, then Proton - Experimental
+EOF
+}
+
+steam_root() {
+	local d
+	for d in "$DATA_DIR/Steam" "$HOME/.steam/steam" "$HOME/.var/app/com.valvesoftware.Steam/data/Steam"; do
+		[ -d "$d/steamapps" ] && { readlink -f "$d"; return; }
+	done
+}
+
+find_proton() {
+	if [ -n "${PROTON:-}" ]; then
+		[ -x "$PROTON/proton" ] || die "PROTON=$PROTON has no 'proton' script"
+		printf '%s\n' "$PROTON"
+		return
+	fi
+	local steam p
+	steam=$(steam_root || true)
+	for p in $(ls -d "$DATA_DIR"/Steam/compatibilitytools.d/GE-Proton* "$steam"/compatibilitytools.d/GE-Proton* 2>/dev/null | sort -Vr); do
+		[ -x "$p/proton" ] && { printf '%s\n' "$p"; return; }
+	done
+	for p in "$steam/steamapps/common/Proton - Experimental" "$steam"/steamapps/common/Proton\ 10*; do
+		[ -x "$p/proton" ] && { printf '%s\n' "$p"; return; }
+	done
+	die "no Proton found: install GE-Proton (e.g. with ProtonUp-Qt) or Proton Experimental in Steam, or set PROTON"
+}
+
+proton_env() {
+	export STEAM_COMPAT_DATA_PATH=$COMPAT
+	export STEAM_COMPAT_CLIENT_INSTALL_PATH=${STEAM_COMPAT_CLIENT_INSTALL_PATH:-$(steam_root || true)}
+	[ -n "$STEAM_COMPAT_CLIENT_INSTALL_PATH" ] || export STEAM_COMPAT_CLIENT_INSTALL_PATH=$T6_DATA
+}
+
+has_nvidia() {
+	command -v nvidia-smi >/dev/null 2>&1 || [ -e /proc/driver/nvidia/version ]
+}
+
+gpu_env() {
+	case $T6_GPU in
+	auto) has_nvidia || return 0 ;;
+	nvidia) ;;
+	default) return 0 ;;
+	*) die "T6_GPU must be auto, nvidia or default" ;;
+	esac
+	# Hybrid laptops: render on the NVIDIA GPU, not on the integrated one
+	export __NV_PRIME_RENDER_OFFLOAD=1 __VK_LAYER_NV_optimus=NVIDIA_only __GLX_VENDOR_LIBRARY_NAME=nvidia
+}
+
+need_install() {
+	[ -f "$T6_HOME/$EXE" ] || die "no launcher in $T6_HOME: run 't6 install' first (or set T6_HOME)"
+}
+
+ensure_prefix() {
+	[ -d "$PFX/drive_c" ] && return
+	say "creating the Proton prefix in $COMPAT"
+	mkdir -p "$COMPAT"
+	proton_env
+	"$(find_proton)/proton" run wineboot.exe -u >/dev/null 2>&1 || die "Proton could not create the prefix"
+}
+
+cmd_fix() {
+	need_install
+	local proton icu
+	proton=$(find_proton)
+	ensure_prefix
+
+	# 1. Qt6Core.dll imports icuuc.dll, which the package does not ship. Wine's icu.dll exports the same functions.
+	icu=$(ls "$proton"/files/lib{,64}/wine/x86_64-windows/icu.dll 2>/dev/null | head -1 || true)
+	[ -n "$icu" ] || die "no icu.dll in $proton (use Proton 9 or newer)"
+	if ! cmp -s "$icu" "$T6_HOME/icuuc.dll"; then
+		install -m 644 "$icu" "$T6_HOME/icuuc.dll"
+		say "fix: copied icuuc.dll from $(basename "$proton")"
+	fi
+
+	# 2. Qt calls WcsCreateIccProfile (a Wine stub that aborts) when a color profile exists.
+	if [ -f "$COLOR_DIR/$COLOR_ICM" ]; then
+		mv -f "$COLOR_DIR/$COLOR_ICM" "$COLOR_DIR/$COLOR_ICM.bak"
+		say "fix: disabled the color profile in the prefix"
+	fi
+
+	# 3. Under Wine the launcher forces the 'rtv' render path; without this the 3D scene is black (issue #18).
+	if ! grep -qsx "$TOML_FIX" "$T6_HOME/native/tekken6.toml"; then
+		mkdir -p "$T6_HOME/native"
+		printf '%s\n' "$TOML_FIX" >>"$T6_HOME/native/tekken6.toml"
+		say "fix: added '$TOML_FIX' to native/tekken6.toml"
+	fi
+}
+
+cmd_run() {
+	cmd_fix
+	local proton
+	proton=$(find_proton)
+	proton_env
+	gpu_env
+	mkdir -p "$T6_DATA"
+	say "starting the launcher with $(basename "$proton") (log: $LOG)"
+	cd "$T6_HOME"
+	exec "$proton/proton" run "./$EXE" >"$LOG" 2>&1
+}
+
+cmd_install() {
+	local zip=${1:-} tmp want got
+	if [ -f "$T6_HOME/$EXE" ]; then
+		die "already installed in $T6_HOME (the launcher updates itself)"
+	fi
+	mkdir -p "$T6_DATA"
+	tmp=$(mktemp -d "$T6_DATA/install.XXXXXX")
+	# shellcheck disable=SC2064 # expand now: tmp is local
+	trap "rm -rf '$tmp'" EXIT
+	if [ -z "$zip" ]; then
+		say "looking up the latest release of $REPO"
+		curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" >"$tmp/release.json" ||
+			die "cannot reach the GitHub API"
+		read -r tag url want < <(python3 -I -c '
+import json, sys
+r = json.load(open(sys.argv[1]))
+a = next(a for a in r["assets"] if a["name"] == sys.argv[2])
+print(r["tag_name"], a["browser_download_url"], (a.get("digest") or "").removeprefix("sha256:"))
+' "$tmp/release.json" "$ASSET") || die "the latest release has no $ASSET"
+		say "downloading $ASSET $tag"
+		zip=$tmp/$ASSET
+		curl -fL --progress-bar -o "$zip" "$url" || die "download failed"
+		[ -n "$want" ] || die "GitHub gives no SHA-256 for $ASSET; download it by hand and run 't6 install <zip>'"
+		got=$(sha256sum "$zip" | cut -d' ' -f1)
+		[ "$got" = "$want" ] || die "SHA-256 mismatch: got $got, want $want"
+		say "SHA-256 OK"
+	fi
+	[ -f "$zip" ] || die "not found: $zip"
+	say "extracting to $T6_HOME"
+	python3 -I -m zipfile -e "$zip" "$tmp/x" || die "cannot extract $zip"
+	[ -f "$tmp/x/Tekken6NativeOnline/$EXE" ] || die "$zip is not the Tekken 6 Native Online package"
+	mkdir -p "$(dirname "$T6_HOME")"
+	rmdir "$T6_HOME" 2>/dev/null || true
+	[ -e "$T6_HOME" ] && die "$T6_HOME exists and is not empty"
+	mv "$tmp/x/Tekken6NativeOnline" "$T6_HOME"
+	cmd_fix
+	say "done: run 't6 run', then in the launcher open Profile -> BUILD GAME and pick your Tekken 6 .iso"
+}
+
+cmd_hash() {
+	local exe=$T6_HOME/native/tekken6.exe
+	[ -f "$exe" ] || die "the game is not built yet (launcher: Profile -> BUILD GAME)"
+	sha256sum "$exe"
+}
+
+cmd_doctor() {
+	local proton ok=1
+	check() { if eval "$2"; then say "  ok    $1"; else say "  FAIL  $1"; ok=0; fi; }
+	say "package   $T6_HOME"
+	say "data      $T6_DATA"
+	proton=$(find_proton 2>/dev/null) && say "proton    $proton ($(cut -d' ' -f2 "$proton/version" 2>/dev/null))" || say "proton    none"
+	say "gpu mode  $T6_GPU$(has_nvidia && printf ' (NVIDIA found)')"
+	if command -v vulkaninfo >/dev/null; then
+		vulkaninfo --summary 2>/dev/null | sed -n 's/^\s*deviceName\s*= /vulkan    /p'
+	fi
+	say "checks:"
+	check "Proton found" '[ -n "$proton" ]'
+	check "package installed" '[ -f "$T6_HOME/$EXE" ]'
+	check "prefix created" '[ -d "$PFX/drive_c" ]'
+	check "icuuc.dll present" '[ -f "$T6_HOME/icuuc.dll" ]'
+	check "color profile disabled" '[ -d "$COLOR_DIR" ] && [ ! -f "$COLOR_DIR/$COLOR_ICM" ]'
+	check "render fix in native/tekken6.toml" 'grep -qsx "$TOML_FIX" "$T6_HOME/native/tekken6.toml"'
+	if [ -f "$T6_HOME/native/tekken6.exe" ]; then
+		say "  ok    game built: $(cut -c1-16 <<<"$(sha256sum "$T6_HOME/native/tekken6.exe")")..."
+	else
+		say "  --    game not built yet (launcher: Profile -> BUILD GAME)"
+	fi
+	if command -v firewall-cmd >/dev/null && systemctl is-active -q firewalld; then
+		say "  info  firewalld zone: $(firewall-cmd --get-default-zone 2>/dev/null)." \
+			"The game uses UDP; FedoraWorkstation allows UDP 1025-65535, other zones may block it."
+	fi
+	[ "$ok" = 1 ]
+}
+
+cmd_desktop() {
+	local self dir=$DATA_DIR/applications
+	self=$(readlink -f "$0")
+	mkdir -p "$dir"
+	cat >"$dir/tekken6-native-online.desktop" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Tekken 6 Native Online
+Comment=Tekken 6 with rollback netcode (Proton)
+Exec="$self" run
+Icon=applications-games
+Categories=Game;
+Terminal=false
+EOF
+	say "added $dir/tekken6-native-online.desktop"
+}
+
+case ${1:-} in
+install) shift; cmd_install "$@" ;;
+run) cmd_run ;;
+fix) cmd_fix ;;
+doctor) cmd_doctor ;;
+hash) cmd_hash ;;
+desktop) cmd_desktop ;;
+-h | --help | help | "") usage ;;
+*) usage >&2; exit 2 ;;
+esac
