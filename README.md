@@ -34,6 +34,8 @@ Other commands:
 
 - `./t6 doctor`: show the setup and check the fixes.
 - `./t6 fix`: apply the fixes only (`run` does this every time).
+- `./t6 check <iso>`: check that the `.iso` is the supported version.
+- `./t6 build <iso>`: build the game from the terminal (the same as BUILD GAME in the launcher).
 - `./t6 hash`: print the SHA-256 of the built game. It must be the same as on a Windows PC.
 
 Settings (environment variables):
@@ -55,12 +57,16 @@ Settings (environment variables):
 
 ## Status
 
-Tested on Fedora 44, GE-Proton10-34, release v2.2.0:
+Tested on Fedora 44, GE-Proton10-34, release v2.2.1, 16 cores, 15 GB RAM:
 
-- Done: install from the release zip, SHA-256 check, prefix creation, all fixes, the launcher starts.
-- Done: the bundled build tools run under Proton (clang 23.1.2, Python 3.12, `rexglue.exe`, `xdvdfs.exe`).
-- Not tested (needs the ISO): the game build, a match, and the frame rate. Also not tested: whether
-  `t6 hash` gives the same hash as a Windows build, which the lobby needs.
+- Done: install (download and SHA-256 check), prefix creation, all fixes, the launcher starts.
+- Done: the game build from the ISO under Proton: 106 files, 327 s. It used most of the RAM
+  and about 6 GB of zram swap (the builder runs one compiler job per core, minus one).
+- Done: Practice mode on the RTX 4060: 60 FPS (16.67 ms average frame time), a few single hitches
+  of about 85 ms, no crashes, correct 3D rendering.
+- Not tested yet: an online match and the exe hash against a Windows player. The
+  launcher compares the game files with the opponent's and reports "your game files differ"
+  on a mismatch.
 
 ## Layout
 

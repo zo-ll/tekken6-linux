@@ -28,6 +28,8 @@ usage: t6 <command>
   install [zip]   Download the latest release (or use a local zip), verify it, extract it to T6_HOME.
   run             Apply the fixes and start the launcher (it builds and starts the game).
   fix             Only apply the fixes.
+  check <iso>     Check that an .iso (or extracted folder) is the supported Tekken 6 version.
+  build <iso>     Build the game from the terminal (the same as BUILD GAME in the launcher).
   doctor          Show the setup and check it.
   hash            Print the SHA-256 of the built game (compare it with a Windows player).
   desktop         Add a menu entry that starts the launcher.
@@ -176,6 +178,35 @@ print(r["tag_name"], a["browser_download_url"], (a.get("digest") or "").removepr
 	say "done: run 't6 run', then in the launcher open Profile -> BUILD GAME and pick your Tekken 6 .iso"
 }
 
+# Runs the package's build script with Proton's wine directly: 'proton run' drops console output.
+builder() {
+	need_install
+	ensure_prefix
+	local wine
+	wine=$(find_proton)/files/bin/wine
+	[ -x "$wine" ] || die "no wine in $(dirname "$(dirname "$wine")")"
+	WINEPREFIX=$PFX WINEDEBUG=-all "$wine" "$T6_HOME/builder/python/python.exe" -u \
+		"$(winpath "$T6_HOME/builder/build_native.py")" "$@"
+}
+
+winpath() {
+	local p
+	p=$(readlink -f "$1")
+	printf 'Z:%s' "${p//\//\\}"
+}
+
+cmd_check() {
+	[ -e "${1:-}" ] || die "usage: t6 check <iso or folder>"
+	builder --check "$(winpath "$1")"
+}
+
+cmd_build() {
+	[ -e "${1:-}" ] || die "usage: t6 build <iso or folder>"
+	cmd_fix
+	builder "$(winpath "$1")"
+	say "log: $T6_HOME/native/build.log"
+}
+
 cmd_hash() {
 	local exe=$T6_HOME/native/tekken6.exe
 	[ -f "$exe" ] || die "the game is not built yet (launcher: Profile -> BUILD GAME)"
@@ -232,6 +263,8 @@ case ${1:-} in
 install) shift; cmd_install "$@" ;;
 run) cmd_run ;;
 fix) cmd_fix ;;
+check) shift; cmd_check "$@" ;;
+build) shift; cmd_build "$@" ;;
 doctor) cmd_doctor ;;
 hash) cmd_hash ;;
 desktop) cmd_desktop ;;
