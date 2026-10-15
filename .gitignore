@@ -1,0 +1,17 @@
+# Build output
+build/
+out/
+generated/
+native/
+
+# Game data and derived assets. Never commit these.
+*.iso
+*.xex
+*.bin
+*.xsh
+*.xpso
+game/
+
+# Local references
+refs/
+*.log
