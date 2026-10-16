@@ -6,6 +6,7 @@ set -euo pipefail
 
 REPO=Ekspym/Tekken6-native-online
 ASSET=tekken6_native_online.zip
+PATCH_ASSET=tekken6_native_online_patch.zip
 EXE="Tekken6 Native Online.exe"
 DATA_DIR=${XDG_DATA_HOME:-$HOME/.local/share}
 T6_HOME=${T6_HOME:-$HOME/Games/Tekken6NativeOnline}
@@ -14,6 +15,7 @@ T6_GPU=${T6_GPU:-auto}
 COMPAT=$T6_DATA/compat
 PFX=$COMPAT/pfx
 LOG=$T6_DATA/launcher.log
+VERSION_FILE=$T6_DATA/version
 COLOR_DIR=$PFX/drive_c/windows/system32/spool/drivers/color
 COLOR_ICM="srgb color space profile.icm"
 TOML_FIX="execute_unclipped_draw_vs_on_cpu = true"
@@ -26,13 +28,15 @@ usage() {
 usage: t6 <command>
 
   install [zip]   Download the latest release (or use a local zip), verify it, extract it to T6_HOME.
+  update          Download the latest patch and apply it to T6_HOME (use this, not the launcher's button).
   run             Apply the fixes and start the launcher (it builds and starts the game).
+  start           Update if there is a new release, then start the launcher. The desktop shortcut uses this.
   fix             Only apply the fixes.
   check <iso>     Check that an .iso (or extracted folder) is the supported Tekken 6 version.
   build <iso>     Build the game from the terminal (the same as BUILD GAME in the launcher).
   doctor          Show the setup and check it.
   hash            Print the SHA-256 of the built game (compare it with a Windows player).
-  desktop         Add a menu entry that starts the launcher.
+  desktop         Add a menu entry and a desktop shortcut that start the launcher.
 
 Environment:
   T6_HOME   game package folder   (now: $T6_HOME)
@@ -139,10 +143,38 @@ cmd_run() {
 	exec "$proton/proton" run "./$EXE" >"$LOG" 2>&1
 }
 
+# cmd_start updates first, then runs. The desktop shortcut calls this, so the player does not need a
+# terminal. The update check is best effort: with no network, start the current version.
+cmd_start() {
+	(cmd_update) || say "t6: the update check failed, starting the current version"
+	cmd_run
+}
+
+# Prints "tag url sha256" for one asset of the latest release.
+latest_asset() {
+	curl -fsSL --connect-timeout 5 --max-time 20 "https://api.github.com/repos/$REPO/releases/latest" | ASSET=$1 python3 -I -c '
+import json, os, sys
+r = json.load(sys.stdin)
+a = next(a for a in r["assets"] if a["name"] == os.environ["ASSET"])
+print(r["tag_name"], a["browser_download_url"], (a.get("digest") or "").removeprefix("sha256:"))
+'
+}
+
+# fetch_asset TAG URL SHA256 DEST: download an asset and verify its SHA-256.
+fetch_asset() {
+	local tag=$1 url=$2 want=$3 dest=$4 got
+	[ -n "$want" ] || die "GitHub gives no SHA-256 for $(basename "$dest"); download it by hand"
+	say "downloading $(basename "$dest") $tag"
+	curl -fL --progress-bar -o "$dest" "$url" || die "download failed"
+	got=$(sha256sum "$dest" | cut -d' ' -f1)
+	[ "$got" = "$want" ] || die "SHA-256 mismatch: got $got, want $want"
+	say "SHA-256 OK"
+}
+
 cmd_install() {
-	local zip=${1:-} tmp want got
+	local zip=${1:-} tmp tag='' url='' want=''
 	if [ -f "$T6_HOME/$EXE" ]; then
-		die "already installed in $T6_HOME (the launcher updates itself)"
+		die "already installed in $T6_HOME (use 't6 update')"
 	fi
 	mkdir -p "$T6_DATA"
 	tmp=$(mktemp -d "$T6_DATA/install.XXXXXX")
@@ -150,21 +182,9 @@ cmd_install() {
 	trap "rm -rf '$tmp'" EXIT
 	if [ -z "$zip" ]; then
 		say "looking up the latest release of $REPO"
-		curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" >"$tmp/release.json" ||
-			die "cannot reach the GitHub API"
-		read -r tag url want < <(python3 -I -c '
-import json, sys
-r = json.load(open(sys.argv[1]))
-a = next(a for a in r["assets"] if a["name"] == sys.argv[2])
-print(r["tag_name"], a["browser_download_url"], (a.get("digest") or "").removeprefix("sha256:"))
-' "$tmp/release.json" "$ASSET") || die "the latest release has no $ASSET"
-		say "downloading $ASSET $tag"
+		read -r tag url want < <(latest_asset "$ASSET") || die "the latest release has no $ASSET"
 		zip=$tmp/$ASSET
-		curl -fL --progress-bar -o "$zip" "$url" || die "download failed"
-		[ -n "$want" ] || die "GitHub gives no SHA-256 for $ASSET; download it by hand and run 't6 install <zip>'"
-		got=$(sha256sum "$zip" | cut -d' ' -f1)
-		[ "$got" = "$want" ] || die "SHA-256 mismatch: got $got, want $want"
-		say "SHA-256 OK"
+		fetch_asset "$tag" "$url" "$want" "$zip"
 	fi
 	[ -f "$zip" ] || die "not found: $zip"
 	say "extracting to $T6_HOME"
@@ -174,8 +194,41 @@ print(r["tag_name"], a["browser_download_url"], (a.get("digest") or "").removepr
 	rmdir "$T6_HOME" 2>/dev/null || true
 	[ -e "$T6_HOME" ] && die "$T6_HOME exists and is not empty"
 	mv "$tmp/x/Tekken6NativeOnline" "$T6_HOME"
+	[ -n "$tag" ] && printf '%s\n' "$tag" >"$VERSION_FILE"
 	cmd_fix
 	say "done: run 't6 run', then in the launcher open Profile -> BUILD GAME and pick your Tekken 6 .iso"
+}
+
+# cmd_update applies the release patch over T6_HOME.
+# The launcher has the same button, but it extracts with C:\Windows\System32\tar.exe (the bsdtar
+# that ships with Windows 10). Wine has no tar.exe, so under Proton the launcher's button always
+# ends in "Extracting the update failed.". Apply the patch here instead.
+cmd_update() {
+	need_install
+	local tag url want tmp
+	read -r tag url want < <(latest_asset "$PATCH_ASSET") || die "the latest release has no $PATCH_ASSET"
+	if [ "$tag" = "$(cat "$VERSION_FILE" 2>/dev/null || true)" ]; then
+		say "already at $tag"
+		return 0
+	fi
+	# Extract inside T6_HOME: each file then replaces the old one with 'mv' (a rename). A rename
+	# succeeds even while the launcher or the game still holds the old file open ('cp' would fail).
+	tmp=$(mktemp -d "$T6_HOME/.update.XXXXXX")
+	# shellcheck disable=SC2064 # expand now: tmp is local
+	trap "rm -rf '$tmp'" EXIT
+	fetch_asset "$tag" "$url" "$want" "$tmp/$PATCH_ASSET"
+	say "extracting over $T6_HOME"
+	python3 -I -m zipfile -e "$tmp/$PATCH_ASSET" "$tmp/x" || die "cannot extract the update"
+	[ -f "$tmp/x/$EXE" ] || die "the update is not the Tekken 6 Native Online patch"
+	(cd "$tmp/x" && find . -type d | while IFS= read -r d; do mkdir -p "$T6_HOME/$d"; done)
+	(cd "$tmp/x" && find . -type f | while IFS= read -r f; do
+		mkdir -p "$T6_HOME/$(dirname "$f")"
+		mv -f "$f" "$T6_HOME/$f"
+	done)
+	rm -rf "$tmp"
+	printf '%s\n' "$tag" >"$VERSION_FILE"
+	cmd_fix
+	say "updated to $tag: close and start the launcher, then build the game again if it asks"
 }
 
 # Runs the package's build script with Proton's wine directly: 'proton run' drops console output.
@@ -243,25 +296,43 @@ cmd_doctor() {
 }
 
 cmd_desktop() {
-	local self dir=$DATA_DIR/applications
+	local self dir desktop
 	self=$(readlink -f "$0")
-	mkdir -p "$dir"
-	cat >"$dir/tekken6-native-online.desktop" <<EOF
+	dir=$DATA_DIR/applications
+	desktop_entry() {
+		cat <<EOF
 [Desktop Entry]
 Type=Application
 Name=Tekken 6 Native Online
 Comment=Tekken 6 with rollback netcode (Proton)
-Exec="$self" run
+Exec="$self" start
 Icon=applications-games
 Categories=Game;
 Terminal=false
+StartupNotify=true
+StartupWMClass=steam_proton
 EOF
+	}
+	mkdir -p "$dir"
+	desktop_entry >"$dir/tekken6-native-online.desktop"
 	say "added $dir/tekken6-native-online.desktop"
+
+	desktop=$(xdg-user-dir DESKTOP 2>/dev/null || true)
+	[ -n "$desktop" ] || desktop=$HOME/Desktop
+	mkdir -p "$desktop"
+	desktop_entry >"$desktop/tekken6-native-online.desktop"
+	chmod +x "$desktop/tekken6-native-online.desktop"
+	# GNOME shows the shortcut as trusted only with this flag; other desktops do not need it.
+	command -v gio >/dev/null 2>&1 &&
+		gio set "$desktop/tekken6-native-online.desktop" metadata::trusted true >/dev/null 2>&1 || true
+	say "added $desktop/tekken6-native-online.desktop"
 }
 
 case ${1:-} in
 install) shift; cmd_install "$@" ;;
+update) cmd_update ;;
 run) cmd_run ;;
+start) cmd_start ;;
 fix) cmd_fix ;;
 check) shift; cmd_check "$@" ;;
 build) shift; cmd_build "$@" ;;
