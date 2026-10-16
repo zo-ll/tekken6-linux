@@ -42,6 +42,7 @@ Other commands:
 - `./t6 fix`: apply the fixes only (`run` does this every time).
 - `./t6 start`: update if there is a new release, then start the launcher. The desktop shortcut uses
 this command.
+- `./t6 stop`: stop the launcher and the game. Use it before `build` if a game is still running.
 - `./t6 update`: download the latest release patch and apply it over `T6_HOME`. Use this instead of
 the launcher's **UPDATE** button (see below).
 - `./t6 check <iso>`: check that the `.iso` is the supported version.
@@ -65,6 +66,7 @@ Settings (environment variables):
 | The launcher aborts in `mscms.dll.WcsCreateIccProfile` (a Wine stub). | Rename the sRGB color profile in the prefix. | upstream issue #10 |
 | The 3D scene is black (the launcher forces the `rtv` render path under Wine). | Add `execute_unclipped_draw_vs_on_cpu = true` to `native/tekken6.toml`. | upstream issue #18 |
 | The launcher's **UPDATE** button ends in "Extracting the update failed." | Wine has no `C:\Windows\System32\tar.exe` (the bsdtar that Windows 10 ships), which the launcher uses to unpack its patch. Run `./t6 update` instead. | Wine |
+| The build fails with `PermissionError: [Errno 13] Permission denied` on `native/libc++.dll`. | A game that is still running keeps that file open, so the builder cannot overwrite it. Run `./t6 stop`, then build again. | Wine |
 
 ## Status
 

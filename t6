@@ -31,6 +31,7 @@ usage: t6 <command>
   update          Download the latest patch and apply it to T6_HOME (use this, not the launcher's button).
   run             Apply the fixes and start the launcher (it builds and starts the game).
   start           Update if there is a new release, then start the launcher. The desktop shortcut uses this.
+  stop            Stop the launcher and the game.
   fix             Only apply the fixes.
   check <iso>     Check that an .iso (or extracted folder) is the supported Tekken 6 version.
   build <iso>     Build the game from the terminal (the same as BUILD GAME in the launcher).
@@ -253,8 +254,19 @@ cmd_check() {
 	builder --check "$(winpath "$1")"
 }
 
+# cmd_stop ends every Wine process of the prefix (the launcher and the game).
+cmd_stop() {
+	[ -d "$PFX/drive_c" ] || return 0
+	say "stopping the launcher and the game"
+	WINEPREFIX=$PFX WINEDEBUG=-all "$(find_proton)/files/bin/wineserver" -k >/dev/null 2>&1 || true
+}
+
 cmd_build() {
 	[ -e "${1:-}" ] || die "usage: t6 build <iso or folder>"
+	# The builder copies builder/runtime/*.dll over native/. A running game keeps those files (for
+	# example native/libc++.dll) open, and the copy then fails with "Permission denied". Stop the
+	# game first.
+	cmd_stop
 	cmd_fix
 	builder "$(winpath "$1")"
 	say "log: $T6_HOME/native/build.log"
@@ -334,6 +346,7 @@ update) cmd_update ;;
 run) cmd_run ;;
 start) cmd_start ;;
 fix) cmd_fix ;;
+stop) cmd_stop ;;
 check) shift; cmd_check "$@" ;;
 build) shift; cmd_build "$@" ;;
 doctor) cmd_doctor ;;
